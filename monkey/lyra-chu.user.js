@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lyra Chunithm 数据捕获
 // @description  用于捕获「电棍」版本的中二数据
-// @version      0.2.0
+// @version      0.2.2
 // @author       GoldSheep3 with Gemini
 // @match        https://*/chunithm/music
 // @match        https://*/chunithm/music?*
@@ -27,10 +27,10 @@
 
     /** @type {Map<string, ChuRecordItem>} */
     const dataMap = new Map();
-    
+
     /** @type {Set<string>} 缓存所有已处理的游玩时间记录 */
     const processedTimes = new Set(GM_getValue("lyra_parse_chu_processed_times", []));
-    
+
     /** @type {Set<string>} 仅保存本次运行前的历史时间记录，用于判定同步边界 */
     const oldTimesSet = new Set(GM_getValue("lyra_parse_chu_processed_times", []));
 
@@ -51,9 +51,19 @@
     };
 
     const BASE_BTN_STYLE = "padding:8px 12px;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:bold;font-size:13px;white-space:nowrap;transition:all 0.2s;";
-    const CONTAINER_STYLE = "position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:10000;display:flex;gap:8px;align-items:center;background:rgba(255,255,255,0.95);padding:10px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);";
-    const MENU_STYLE = "position:absolute;bottom:calc(100% + 10px);right:0;background:rgba(255,255,255,0.95);padding:8px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);display:none;flex-direction:column;gap:8px;";
+    const CONTAINER_STYLE = "position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:10000;display:flex;gap:8px;align-items:center;background:rgba(255,255,255,0.95);padding:10px;border:1px solid rgba(0,0,0,0.06);border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);";
+    const MENU_STYLE = "position:absolute;bottom:calc(100% + 10px);right:0;background:rgba(255,255,255,0.95);padding:8px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.15);display:none;flex-direction:column;gap:8px;min-width:200px;";
     const LABEL_STYLE = "background:#f1c40f;color:#2c3e50;padding:6px 10px;border-radius:8px;font-weight:900;font-size:14px;letter-spacing:1px;user-select:none;";
+
+    const normalizePlayTime = (s) => (s || "").toString().trim().replace(/\s+/g, ' ');
+
+    function refreshOldTimesSetFromProcessedTimes() {
+        oldTimesSet.clear();
+        for (const t of processedTimes) {
+            const nt = normalizePlayTime(t);
+            if (nt) oldTimesSet.add(nt);
+        }
+    }
 
     /**
      * 清洗图片名称，提取核心标识并映射 Rank
@@ -62,22 +72,23 @@
         if (!src) return "";
         let name = src.split('/').pop().replace(/\.[^/.]+$/, "");
         name = name.replace('music_icon_', '')
-                   .replace('music_', '')
-                   .replace('diff_', '')
-                   .replace('musiclevel_', '') // 中二专属前缀
-                   .replace('icon_', '');      // 中二图标前缀
-        
-        // 处理 rank_* 映射
+            .replace('music_', '')
+            .replace('diff_', '')
+            .replace('musiclevel_', '')
+            .replace('icon_', '');
+
         const rankMatch = name.match(/^rank_(\d+)$/);
         if (rankMatch) {
             const rankNum = rankMatch[1];
-            if (RANK_MAP[rankNum]) {
-                return RANK_MAP[rankNum];
-            }
+            if (RANK_MAP[rankNum]) return RANK_MAP[rankNum];
         }
-        
+
         return name;
     };
+
+    const normalizeString = (v) => (typeof v === 'string') ? v.trim() : "";
+    const normalizeNumber = (v) => (typeof v === 'number' && Number.isFinite(v)) ? v : 0;
+    const normalizeIcons = (v) => Array.isArray(v) ? v.map(x => normalizeString(x)).filter(x => x !== "") : [];
 
     const parseTime = (timeStr) => {
         if (!timeStr) return 0;
@@ -104,6 +115,99 @@
         }
     };
 
+    function parseSheetId(sheetId) {
+        if (!sheetId || typeof sheetId !== 'string') return null;
+        const parts = sheetId.split('__chu__');
+        if (parts.length !== 2) return null;
+
+        const title = (parts[0] || "").trim();
+        const diff = (parts[1] || "").trim();
+        if (!title || !diff) return null;
+
+        return { title, diff };
+    }
+
+    function normalizeImportedItem(item) {
+        if (!item || !item.sheetId || typeof item.sheetId !== 'string') return null;
+
+        const parsed = parseSheetId(item.sheetId);
+
+        const explicitTitle = normalizeString(item.title);
+        const explicitDiff = normalizeString(item.diff);
+
+        const score = normalizeNumber(item.score);
+        const icons = normalizeIcons(item.icons);
+        const play_time = normalizePlayTime(item.play_time);
+
+        const hasUseful =
+            score > 0 ||
+            icons.length > 0 ||
+            play_time !== "" ||
+            explicitTitle !== "" ||
+            explicitDiff !== "";
+
+        if (!hasUseful) return null;
+
+        return {
+            sheetId: item.sheetId,
+            title: explicitTitle || (parsed ? parsed.title : ""),
+            diff: explicitDiff || (parsed ? parsed.diff : ""),
+            score,
+            icons,
+            play_time
+        };
+    }
+
+    function mergeRecordIntoMap(incoming) {
+        if (!incoming || !incoming.sheetId) return false;
+
+        const sheetId = incoming.sheetId;
+        const old = dataMap.get(sheetId) || {
+            sheetId,
+            title: "",
+            diff: "",
+            score: 0,
+            icons: [],
+            play_time: ""
+        };
+
+        const incomingScore = normalizeNumber(incoming.score);
+        const oldScore = normalizeNumber(old.score);
+        const isScoreBetter = incomingScore > oldScore;
+
+        const title = normalizeString(old.title) || normalizeString(incoming.title);
+        const diff = normalizeString(old.diff) || normalizeString(incoming.diff);
+
+        const incomingIcons = normalizeIcons(incoming.icons);
+        const oldIcons = normalizeIcons(old.icons);
+        const shouldUpdateIcons =
+            (incomingIcons.length > 0) && (isScoreBetter || oldIcons.length === 0);
+
+        const incomingPlayTime = normalizePlayTime(incoming.play_time);
+        const shouldFillPlayTime = (!normalizePlayTime(old.play_time) && incomingPlayTime);
+
+        const shouldUpdate =
+            isScoreBetter ||
+            (title !== old.title) ||
+            (diff !== old.diff) ||
+            shouldUpdateIcons ||
+            shouldFillPlayTime;
+
+        if (!shouldUpdate) return false;
+
+        const merged = {
+            sheetId,
+            title,
+            diff,
+            score: Math.max(oldScore, incomingScore),
+            icons: shouldUpdateIcons ? incomingIcons : oldIcons,
+            play_time: shouldFillPlayTime ? incomingPlayTime : normalizePlayTime(old.play_time)
+        };
+
+        dataMap.set(sheetId, merged);
+        return true;
+    }
+
     // --- 1. 核心捕获逻辑 ---
     function captureCurrentVisibleItems(ignoreCache = false) {
         const playlogItems = document.querySelectorAll('.n-list-item');
@@ -116,20 +220,18 @@
             if (!raw || !raw.title) return;
 
             if (isPlaylog && raw.play_time) {
-                if (!ignoreCache && oldTimesSet.has(raw.play_time)) {
+                const npt = normalizePlayTime(raw.play_time);
+                if (!ignoreCache && npt && oldTimesSet.has(npt)) {
                     hitCachedTime = true;
                     return;
                 }
-                processedTimes.add(raw.play_time);
+                if (npt) processedTimes.add(npt);
+                raw.play_time = npt;
             }
 
-            // CHU 的 sheetId 生成规则
             const sheetId = `${raw.title}__chu__${raw.diff}`;
+            const old = dataMap.get(sheetId) || { sheetId, title: "", diff: "", score: 0, icons: [], play_time: "" };
 
-            /** @type {ChuRecordItem} */
-            const old = dataMap.get(sheetId) || { score: 0, icons: [], play_time: "" };
-
-            // CHU 主要以 Score 作为成绩判定标准
             const isScoreBetter = raw.score > old.score;
 
             if (isScoreBetter || (isPlaylog && !old.play_time)) {
@@ -138,7 +240,6 @@
                     title: raw.title,
                     diff: raw.diff,
                     score: Math.max(old.score, raw.score),
-                    // 当分数更高时，同步更新图标状态；否则保留原图标
                     icons: isScoreBetter ? raw.icons : old.icons,
                     play_time: (isPlaylog && raw.play_time) ? raw.play_time : old.play_time
                 };
@@ -147,17 +248,16 @@
             }
         };
 
-        // A. 抓取列表 (Playlog/Record)
         playlogItems.forEach(node => {
             if (hitCachedTime) return;
-            
+
             const isPlaylog = !!node.querySelector('.play_datalist_date');
             let raw = null;
-            
+
             if (isPlaylog) {
                 const iconImgs = Array.from(node.querySelectorAll('.play_musicdata_icon img')).map(img => getImgName(img.src));
                 const scoreText = node.querySelector('.play_musicdata_score_text')?.innerText || "0";
-                
+
                 raw = {
                     title: node.querySelector('.play_musicdata_title')?.innerText.trim(),
                     diff: getImgName(node.querySelector('.play_track_result img')?.src),
@@ -165,8 +265,7 @@
                     icons: iconImgs,
                     play_time: node.querySelector('.play_datalist_date')?.innerText.trim()
                 };
-            } 
-            else if (node.querySelector('.music_name_block')) {
+            } else if (node.querySelector('.music_name_block')) {
                 const scoreText = node.querySelector('.music_score_block span')?.innerText || node.querySelector('.music_score_block')?.innerText || "0";
                 raw = {
                     title: node.querySelector('.music_name_block')?.innerText.trim(),
@@ -179,14 +278,13 @@
             if (raw) processItem(raw, isPlaylog);
         });
 
-        // B. 抓取新版栅格
         tileItems.forEach(node => {
             if (hitCachedTime) return;
 
             const title = node.querySelector('.title')?.innerText.trim();
             const diffImg = getImgName(node.querySelector('.diff')?.src || node.querySelector('img[src*="musiclevel_"]')?.src);
             const scoreStr = node.querySelector('.row .val')?.innerText || "0";
-            
+
             const raw = {
                 title: title,
                 diff: diffImg,
@@ -240,7 +338,7 @@
             await new Promise(r => setTimeout(r, 500));
 
             let lastHeight = 0, sameHeightCount = 0;
-            
+
             while (sameHeightCount < 3) {
                 if (stopRequested) break;
 
@@ -257,7 +355,7 @@
 
                 window.scrollBy(0, 3000);
                 await new Promise(r => setTimeout(r, 300));
-                
+
                 let currentHeight = document.documentElement.scrollHeight;
                 if (currentHeight === lastHeight) sameHeightCount++;
                 else { lastHeight = currentHeight; sameHeightCount = 0; }
@@ -271,7 +369,7 @@
             if (pageButtons.length > 0) {
                 const nextBtn = pageButtons[pageButtons.length - 1];
                 const isDisabled = nextBtn.classList.contains('n-pagination-item--disabled') || nextBtn.hasAttribute('disabled');
-                                   
+
                 if (isDisabled) {
                     hasNextPage = false;
                 } else {
@@ -287,7 +385,7 @@
         if (antiCrawlerTriggered) prefix = `检测到反爬限制，已强制终止提取（查阅了 ${pageCount} 页）。`;
         else if (stopRequested) prefix = `已手动停止导入（查阅了 ${pageCount} 页）。`;
         else if (shouldStopOverall) prefix = `触发增量同步！已自动停止（查阅了 ${pageCount} 页）。`;
-        
+
         finishImport(prefix);
     }
 
@@ -296,7 +394,7 @@
         isImporting = true;
         stopRequested = false;
         updateUIState();
-        
+
         let antiCrawlerTriggered = false;
 
         const savedData = GM_getValue("lyra_parse_chu_records", []);
@@ -306,10 +404,10 @@
         await new Promise(r => setTimeout(r, 500));
 
         let lastHeight = 0, sameHeightCount = 0;
-        
+
         while (sameHeightCount < 3) {
             if (stopRequested) break;
-            
+
             if (hasAntiCrawlerWarning()) {
                 antiCrawlerTriggered = true;
                 break;
@@ -319,25 +417,115 @@
 
             window.scrollBy(0, 3000);
             await new Promise(r => setTimeout(r, 300));
-            
+
             let currentHeight = document.documentElement.scrollHeight;
             if (currentHeight === lastHeight) sameHeightCount++;
             else { lastHeight = currentHeight; sameHeightCount = 0; }
         }
-        
+
         saveCurrentData();
 
         let prefix = "强制导入本页完成。";
         if (antiCrawlerTriggered) prefix = "检测到反爬限制，已强制终止。";
         else if (stopRequested) prefix = "已中断强制导入。";
-        
+
         finishImport(prefix);
+    }
+
+    function importJsonFile(mode = 'incremental') {
+        if (isImporting) return;
+
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'application/json';
+        input.style.display = 'none';
+        document.body.appendChild(input);
+
+        input.onchange = async (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) {
+                document.body.removeChild(input);
+                return;
+            }
+
+            try {
+                const text = await file.text();
+                const parsed = JSON.parse(text);
+                if (!Array.isArray(parsed)) {
+                    alert("导入失败：JSON 必须为数组格式。");
+                    return;
+                }
+
+                const savedData = GM_getValue("lyra_parse_chu_records", []);
+                savedData.forEach(item => dataMap.set(item.sheetId, item));
+
+                let imported = 0;
+                let updated = 0;
+                let skipped = 0;
+
+                if (mode === 'overwrite') {
+                    dataMap.clear();
+                    processedTimes.clear();
+                    oldTimesSet.clear();
+                }
+
+                for (const rawItem of parsed) {
+                    const incoming = normalizeImportedItem(rawItem);
+                    if (!incoming) {
+                        skipped++;
+                        continue;
+                    }
+
+                    imported++;
+
+                    if (mode === 'overwrite') {
+                        const rec = {
+                            sheetId: incoming.sheetId,
+                            title: normalizeString(incoming.title),
+                            diff: normalizeString(incoming.diff),
+                            score: normalizeNumber(incoming.score),
+                            icons: normalizeIcons(incoming.icons),
+                            play_time: normalizePlayTime(incoming.play_time)
+                        };
+                        dataMap.set(rec.sheetId, rec);
+                        if (rec.play_time) processedTimes.add(rec.play_time);
+                        updated++;
+                        continue;
+                    }
+
+                    const changed = mergeRecordIntoMap(incoming);
+                    if (incoming.play_time) processedTimes.add(incoming.play_time);
+                    if (changed) updated++;
+                }
+
+                saveCurrentData();
+
+                // 关键修复：导入后刷新 oldTimesSet（保证同一次会话里立刻生效）
+                refreshOldTimesSetFromProcessedTimes();
+
+                const modeText = (mode === 'overwrite') ? "覆盖导入" : "增量导入";
+                alert(`${modeText}完成：读入 ${imported} 条，合并/写入 ${updated} 条，跳过 ${skipped} 条（信息不足/格式不符）。`);
+            } catch (err) {
+                console.error(err);
+                alert("导入失败：读取或解析文件时出错，请确认为合法 JSON 文件。");
+            } finally {
+                document.body.removeChild(input);
+            }
+        };
+
+        input.click();
     }
 
     function exportFlatJson() {
         const savedData = GM_getValue("lyra_parse_chu_records", []);
         if (savedData.length === 0) return alert("没有数据可供导出！");
-        const blob = new Blob([JSON.stringify(savedData, null, 2)], {type: 'application/json'});
+
+        const normalized = savedData.map(item => ({
+            ...item,
+            play_time: normalizePlayTime(item.play_time)
+        }));
+
+        const blob = new Blob([JSON.stringify(normalized, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = `chu_unified_profile_${Date.now()}.json`;
@@ -348,7 +536,7 @@
         const btn = document.getElementById('tm-clear-btn');
         if (btn) {
             const len = GM_getValue("lyra_parse_chu_records", []).length;
-            btn.innerText = `清除数据 (${len})`; 
+            btn.innerText = `清除数据 (${len})`;
         }
     }
 
@@ -358,28 +546,26 @@
             "1. 同步数据：自动滚动翻页收集游玩记录，遇到历史记录时会自动增量判定并停止。\n" +
             "2. 强制同步：忽略历史时间判定，强制遍历抓取当前页可视的所有数据（不会自动翻页）。\n" +
             "3. 停止：在抓取中途可以随时点击中断，已抓取部分会自动保存。\n" +
-            "4. 反爬：若网站提示“读取失败”，脚本会自动保存当页内容并强制中断。"
+            "4. 反爬：若网站提示“读取失败”，脚本会自动保存当页内容并强制中断。\n" +
+            "5. 导入：支持“增量导入 JSON”与“覆盖导入 JSON”。导入后会刷新时间缓存用于增量判定。\n"
         );
     }
 
-    // --- 4. UI 初始化 ---
     function createUI() {
         if (document.getElementById('tm-capture-container')) return;
-        
+
         const container = document.createElement('div');
         container.id = "tm-capture-container";
-        container.style = CONTAINER_STYLE; 
+        container.style = CONTAINER_STYLE;
 
-        // 游戏标签
         const gameLabel = document.createElement('div');
         gameLabel.innerText = "CHU";
         gameLabel.style = LABEL_STYLE;
 
-        // 主按钮区
         const btnCatch = document.createElement('button');
-        btnCatch.innerText = "同步数据";
+        btnCatch.innerText = "���步数据";
         btnCatch.style = BASE_BTN_STYLE + "background:#00b8a9;";
-        btnCatch.onclick = autoPaginateAndCollect; 
+        btnCatch.onclick = autoPaginateAndCollect;
         uiRefs.btnCatch = btnCatch;
 
         const btnExport = document.createElement('button');
@@ -393,7 +579,6 @@
         btnStop.onclick = () => { if (isImporting) stopRequested = true; };
         uiRefs.btnStop = btnStop;
 
-        // 更多菜单
         const moreWrapper = document.createElement('div');
         moreWrapper.style = "position:relative;";
 
@@ -409,6 +594,20 @@
         btnForce.style = BASE_BTN_STYLE + "background:#f39c12;";
         btnForce.onclick = () => { moreMenu.style.display = 'none'; forceImportCurrentPage(); };
 
+        const btnImportInc = document.createElement('button');
+        btnImportInc.innerText = "增量导入 JSON";
+        btnImportInc.style = BASE_BTN_STYLE + "background:#16a085;";
+        btnImportInc.onclick = () => { moreMenu.style.display = 'none'; importJsonFile('incremental'); };
+
+        const btnImportOvr = document.createElement('button');
+        btnImportOvr.innerText = "覆盖导入 JSON";
+        btnImportOvr.style = BASE_BTN_STYLE + "background:#d35400;";
+        btnImportOvr.onclick = () => {
+            moreMenu.style.display = 'none';
+            if (!confirm("确定要覆盖本地 CHU 档案吗？此操作会清空当前缓存，且不可逆。")) return;
+            importJsonFile('overwrite');
+        };
+
         const btnHelp = document.createElement('button');
         btnHelp.innerText = "使用说明";
         btnHelp.style = BASE_BTN_STYLE + "background:#2c3e50;";
@@ -417,29 +616,29 @@
         const btnClear = document.createElement('button');
         btnClear.id = 'tm-clear-btn';
         btnClear.style = BASE_BTN_STYLE + "background:#c0392b;";
-        btnClear.onclick = () => { 
+        btnClear.onclick = () => {
             moreMenu.style.display = 'none';
-            if(confirm("确定清空本地 CHU 档案吗？所有数据及时间缓存将被抹除。")) { 
-                GM_deleteValue("lyra_parse_chu_records"); 
+            if (confirm("确定清空本地 CHU 档案吗？所有数据及时间缓存将被抹除。")) {
+                GM_deleteValue("lyra_parse_chu_records");
                 GM_deleteValue("lyra_parse_chu_processed_times");
-                dataMap.clear(); 
+                dataMap.clear();
                 processedTimes.clear();
                 oldTimesSet.clear();
-                updateClearButtonText(); 
+                updateClearButtonText();
             }
         };
 
         moreMenu.appendChild(btnForce);
+        moreMenu.appendChild(btnImportInc);
+        moreMenu.appendChild(btnImportOvr);
         moreMenu.appendChild(btnHelp);
         moreMenu.appendChild(btnClear);
 
-        // 菜单切换逻辑
         btnMore.onclick = (e) => {
             e.stopPropagation();
-            moreMenu.style.display = moreMenu.style.display === 'none' ? 'flex' : 'none';
+            moreMenu.style.display = (moreMenu.style.display === 'none' || moreMenu.style.display === '') ? 'flex' : 'none';
         };
 
-        // 点击外部关闭菜单
         document.addEventListener('click', () => {
             moreMenu.style.display = 'none';
         });
