@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Lyra Maimai 数据捕获
 // @description  用于捕获「电棍」版本的舞萌数据
-// @version      0.2.2
+// @version      0.2.3
 // @author       GoldSheep3 with Gemini
 // @match        https://*/maimai/music
 // @match        https://*/maimai/music?*
