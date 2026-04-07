@@ -50,7 +50,7 @@
 
     const RANK_WEIGHT = {
         combo: { "fc": 1, "fcp": 2, "ap": 3, "app": 4 },
-        sync: { "fs": 1, "fsp": 2, "fdx": 3, "fdxp": 4 }
+        sync: { "sync": 1, "fs": 2, "fsp": 3, "fdx": 4, "fsd": 4, "fdxp": 5, "fsdp": 5 }
     };
 
     const BASE_BTN_STYLE = "padding:8px 12px;color:white;border:none;border-radius:8px;cursor:pointer;font-weight:bold;font-size:13px;white-space:nowrap;transition:all 0.2s;";
